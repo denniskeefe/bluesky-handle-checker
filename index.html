@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bluesky Username Enumerator</title>
+<style>
+  :root {
+    --bg:#0a0e1a; --surface:#111827; --card:#1a2235; --border:#1e3a5f;
+    --accent:#00d4ff; --accent2:#0077b6; --text:#e2e8f0; --muted:#94a3b8;
+    --green:#22c55e; --yellow:#f59e0b; --red:#ef4444;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.6;min-height:100vh}
+  main{max-width:1100px;margin:0 auto;padding:2rem 1rem 4rem}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  h1{font-size:1.6rem;color:var(--accent)} .sub{color:var(--muted);margin:.25rem 0 1.5rem;font-size:.92rem}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.1rem;margin-bottom:1.25rem}
+  label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em}
+  textarea,input,select{width:100%;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:.55rem .7rem;font:inherit;font-size:.9rem}
+  textarea{min-height:170px;font-family:ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+  textarea:focus,input:focus,select:focus{outline:1px solid var(--accent)}
+  .row{display:grid;grid-template-columns:2fr 1fr 1fr;gap:1rem;margin-top:1rem}
+  @media(max-width:640px){.row{grid-template-columns:1fr}}
+  .actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1rem;align-items:center}
+  button{background:var(--accent2);color:#fff;border:0;border-radius:6px;padding:.55rem 1.1rem;font:inherit;font-size:.9rem;cursor:pointer}
+  button:hover:not(:disabled){background:var(--accent);color:#04121c}
+  button.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .hint{font-size:.78rem;color:var(--muted);margin-top:.4rem}
+  .bar{height:6px;background:var(--surface);border-radius:3px;overflow:hidden;margin-top:1rem}
+  .bar>div{height:100%;width:0;background:var(--accent);transition:width .15s}
+  .stats{display:flex;flex-wrap:wrap;gap:1.2rem;margin-top:.7rem;font-size:.85rem;color:var(--muted)}
+  .stats b{color:var(--text)}
+  .filters{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem}
+  .chip{background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:99px;padding:.2rem .8rem;font-size:.8rem;cursor:pointer}
+  .chip.on{border-color:var(--accent);color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:.86rem}
+  th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+  .tw{overflow-x:auto}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+  .s{display:inline-block;padding:.05rem .55rem;border-radius:99px;font-size:.75rem;font-weight:600}
+  .s.found{background:#06301a;color:var(--green)} .s.free{background:#102a44;color:var(--accent)}
+  .s.err{background:#3a2a05;color:var(--yellow)} .s.bad{background:#3a0f0f;color:var(--red)}
+  .s.pend{background:var(--surface);color:var(--muted)}
+  .empty{color:var(--muted);text-align:center;padding:1.5rem}
+  .note{font-size:.78rem;color:var(--muted);margin-top:1.5rem}
+</style>
+</head>
+<body>
+<main>
+  
+  <h1>Bluesky Username Enumerator</h1>
+  <p class="sub">Check a list of handles against Bluesky and see which exist. Runs entirely in your browser against the public Bluesky AppView API; nothing is sent to Analyst Recon.</p>
+
+  <section class="panel">
+    <label for="input">Usernames (one per line, or comma / space separated)</label>
+    <textarea id="input" placeholder="jay&#10;alice&#10;bob.example.com&#10;@carol.bsky.social" spellcheck="false"></textarea>
+    <div class="hint">Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped.</div>
+    <div class="row">
+      <div>
+        <label for="suffix">Default suffix</label>
+        <input id="suffix" value="bsky.social" spellcheck="false" />
+      </div>
+      <div>
+        <label for="conc">Concurrency</label>
+        <select id="conc"><option>1</option><option>2</option><option selected>4</option><option>8</option></select>
+      </div>
+      <div>
+        <label for="delay">Delay per request (ms)</label>
+        <input id="delay" type="number" min="0" step="50" value="100" />
+      </div>
+    </div>
+    <div class="actions">
+      <button id="run">Run enumeration</button>
+      <button id="stop" class="ghost" disabled>Stop</button>
+      <button id="csv" class="ghost" disabled>Export CSV</button>
+      <button id="clear" class="ghost">Clear</button>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section class="panel">
+    <div class="filters" id="filters"></div>
+    <div class="tw">
+      <table>
+        <thead><tr><th>Handle</th><th>Status</th><th>Display name</th><th>DID</th><th>Followers</th><th>Posts</th><th>Created</th><th>Profile</th></tr></thead>
+        <tbody id="out"><tr><td colspan="8" class="empty">No results yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="note">Status key: <b>Found</b> = profile exists; <b>Not found</b> = handle unclaimed or does not resolve; <b>Invalid</b> = not a syntactically valid handle; <b>Error</b> = network or rate-limit failure (re-run). Results reflect the public AppView only; accounts that block logged-out viewing or are taken down may report as not found. Use only for lawful, authorized research.</p>
+</main>
+
+<script>
+const API = 'https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=';
+const $ = id => document.getElementById(id);
+let rows = [], running = false, stopFlag = false, filter = 'all';
+
+function normalize(raw, suffix) {
+  let h = raw.trim().replace(/^https?:\/\/(www\.)?bsky\.app\/profile\//i, '').replace(/[\/?#].*$/, '').replace(/^@/, '').toLowerCase();
+  if (!h) return null;
+  if (!h.includes('.') && suffix) h = h + '.' + suffix.replace(/^\./, '').toLowerCase();
+  return h;
+}
+// AT Protocol handle syntax
+function validHandle(h) {
+  if (h.length > 253) return false;
+  const parts = h.split('.');
+  if (parts.length < 2) return false;
+  if (!/^[a-z]/.test(parts[parts.length - 1])) return false;
+  return parts.every(p => p.length >= 1 && p.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(p));
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function check(row, delay) {
+  if (!validHandle(row.handle)) { row.status = 'bad'; return; }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const r = await fetch(API + encodeURIComponent(row.handle));
+      if (r.status === 429) { await sleep(1500 * (attempt + 1)); continue; }
+      if (r.ok) {
+        const d = await r.json();
+        Object.assign(row, { status: 'found', did: d.did, name: d.displayName || '', followers: d.followersCount ?? '', posts: d.postsCount ?? '', created: (d.createdAt || '').slice(0, 10) });
+        if (d.handle && d.handle !== row.handle) row.handle = d.handle;
+        return;
+      }
+      if (r.status === 400) { row.status = 'free'; return; }
+      row.status = 'err'; row.error = 'HTTP ' + r.status; return;
+    } catch (e) { row.error = 'network'; await sleep(500); }
+  }
+  row.status = 'err'; row.error = row.error || 'rate limited';
+}
+
+async function run() {
+  const suffix = $('suffix').value.trim();
+  const seen = new Set();
+  rows = $('input').value.split(/[\s,;]+/).map(x => normalize(x, suffix)).filter(h => h && !seen.has(h) && seen.add(h)).map(h => ({ handle: h, status: 'pend' }));
+  if (!rows.length) return;
+  running = true; stopFlag = false;
+  $('run').disabled = true; $('stop').disabled = false; $('csv').disabled = true;
+  const conc = +$('conc').value, delay = Math.max(0, +$('delay').value || 0);
+  let i = 0;
+  render();
+  const worker = async () => {
+    while (!stopFlag && i < rows.length) {
+      const row = rows[i++];
+      await check(row, delay);
+      render();
+      if (delay) await sleep(delay);
+    }
+  };
+  await Promise.all(Array.from({ length: conc }, worker));
+  running = false;
+  $('run').disabled = false; $('stop').disabled = true; $('csv').disabled = !rows.length;
+  render();
+}
+
+const LABEL = { found: 'Found', free: 'Not found', err: 'Error', bad: 'Invalid', pend: 'Pending' };
+const CLS = { found: 'found', free: 'free', err: 'err', bad: 'bad', pend: 'pend' };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function render() {
+  const c = k => rows.filter(r => r.status === k).length;
+  const done = rows.filter(r => r.status !== 'pend').length;
+  $('prog').style.width = rows.length ? (done / rows.length * 100) + '%' : '0';
+  $('stats').innerHTML = rows.length ? `<span>Checked <b>${done}/${rows.length}</b></span><span>Found <b>${c('found')}</b></span><span>Not found <b>${c('free')}</b></span><span>Invalid <b>${c('bad')}</b></span><span>Errors <b>${c('err')}</b></span>` : '';
+  $('filters').innerHTML = ['all', 'found', 'free', 'err', 'bad'].map(k => `<span class="chip ${filter === k ? 'on' : ''}" data-f="${k}">${k === 'all' ? 'All' : LABEL[k]}</span>`).join('');
+  const vis = rows.filter(r => filter === 'all' || r.status === filter);
+  $('out').innerHTML = vis.length ? vis.map(r => `<tr>
+    <td class="mono">${esc(r.handle)}</td>
+    <td><span class="s ${CLS[r.status]}">${LABEL[r.status]}</span>${r.error ? ' <span class="hint">' + esc(r.error) + '</span>' : ''}</td>
+    <td>${esc(r.name)}</td><td class="mono">${esc(r.did)}</td><td>${esc(r.followers)}</td><td>${esc(r.posts)}</td><td>${esc(r.created)}</td>
+    <td>${r.status === 'found' ? `<a href="https://bsky.app/profile/${encodeURIComponent(r.handle)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</td></tr>`).join('')
+    : '<tr><td colspan="8" class="empty">No results yet.</td></tr>';
+}
+
+function exportCsv() {
+  const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const lines = [['handle', 'status', 'display_name', 'did', 'followers', 'posts', 'created', 'url'].join(',')]
+    .concat(rows.map(r => [r.handle, LABEL[r.status], r.name, r.did, r.followers, r.posts, r.created, r.status === 'found' ? 'https://bsky.app/profile/' + r.handle : ''].map(q).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+  a.download = 'bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+$('run').onclick = run;
+$('stop').onclick = () => { stopFlag = true; };
+$('csv').onclick = exportCsv;
+$('clear').onclick = () => { if (running) return; rows = []; $('input').value = ''; $('csv').disabled = true; render(); };
+$('filters').onclick = e => { const f = e.target.dataset.f; if (f) { filter = f; render(); } };
+render();
+</script>
+</body>
+</html>

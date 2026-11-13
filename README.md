@@ -1,4 +1,4 @@
-# Bluesky Username Enumerator
+# Bluesky Handle Checker
 
 A single-file, client-side tool that checks a list of usernames against Bluesky and reports which handles exist.
 

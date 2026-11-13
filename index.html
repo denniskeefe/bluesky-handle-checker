@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Check a list of usernames or email addresses against Bluesky and see which handles exist. Runs entirely in the browser." />
+<meta name="referrer" content="no-referrer" />
 <title>Bluesky Username Enumerator</title>
 <style>
   :root {
@@ -35,6 +37,7 @@
   .filters{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem}
   .chip{background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:99px;padding:.2rem .8rem;font-size:.8rem;cursor:pointer}
   .chip.on{border-color:var(--accent);color:var(--accent)}
+  button.chip:hover:not(:disabled){background:var(--surface);color:var(--accent);border-color:var(--accent)}
   table{width:100%;border-collapse:collapse;font-size:.86rem}
   th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--border);vertical-align:top}
   th{color:var(--muted);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
@@ -43,6 +46,7 @@
   .s{display:inline-block;padding:.05rem .55rem;border-radius:99px;font-size:.75rem;font-weight:600}
   .s.found{background:#06301a;color:var(--green)} .s.free{background:#102a44;color:var(--accent)}
   .s.err{background:#3a2a05;color:var(--yellow)} .s.bad{background:#3a0f0f;color:var(--red)}
+  .s.gone{background:#2a1540;color:#c084fc}
   .s.pend{background:var(--surface);color:var(--muted)}
   .empty{color:var(--muted);text-align:center;padding:1.5rem}
   .note{font-size:.78rem;color:var(--muted);margin-top:1.5rem}
@@ -52,12 +56,12 @@
 <main>
   
   <h1>Bluesky Username Enumerator</h1>
-  <p class="sub">Check a list of handles against Bluesky and see which exist. Runs entirely in your browser against the public Bluesky AppView API; nothing is sent to Analyst Recon.</p>
+  <p class="sub">Check a list of handles against Bluesky and see which exist. Runs entirely in your browser against the public Bluesky AppView API; there is no backend, and the only requests made are the lookups themselves.</p>
 
   <section class="panel">
     <label for="input">Usernames or email addresses (one per line, or comma / space separated)</label>
     <textarea id="input" placeholder="jay&#10;alice@example.com&#10;john.doe+news@gmail.com&#10;bob.example.com&#10;@carol.bsky.social" spellcheck="false"></textarea>
-    <div class="hint">Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped. <b>Email addresses</b> are reduced to the part before the <code>@</code>; any <code>+tag</code> is dropped, and since <code>bsky.social</code> names cannot contain dots or underscores, both a joined (<code>johndoe</code>) and hyphenated (<code>john-doe</code>) variant are checked.</div>
+    <div class="hint">Press Ctrl/Cmd + Enter to run. Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped. <b>Email addresses</b> are reduced to the part before the <code>@</code>; any <code>+tag</code> is dropped, and since <code>bsky.social</code> names cannot contain dots or underscores, both a joined (<code>johndoe</code>) and hyphenated (<code>john-doe</code>) variant are checked.</div>
     <div class="row">
       <div>
         <label for="suffix">Default suffix</label>
@@ -75,25 +79,26 @@
     <div class="actions">
       <button id="run">Run enumeration</button>
       <button id="stop" class="ghost" disabled>Stop</button>
+      <button id="retry" class="ghost" disabled>Re-check errors / pending</button>
       <button id="csv" class="ghost" disabled>Export CSV</button>
       <button id="pdf" class="ghost" disabled>Export PDF</button>
       <button id="clear" class="ghost">Clear</button>
     </div>
     <div class="bar"><div id="prog"></div></div>
-    <div class="stats" id="stats"></div>
+    <div class="stats" id="stats" aria-live="polite"></div>
   </section>
 
   <section class="panel">
     <div class="filters" id="filters"></div>
     <div class="tw">
       <table>
-        <thead><tr><th>Handle</th><th>Source email</th><th>Status</th><th>Display name</th><th>DID</th><th>Followers</th><th>Posts</th><th>Created</th><th>Profile</th></tr></thead>
+        <thead><tr><th>Handle</th><th>Source email</th><th>Status</th><th>Display name / bio</th><th>DID</th><th>Followers</th><th>Posts</th><th>Created</th><th>Profile</th></tr></thead>
         <tbody id="out"><tr><td colspan="9" class="empty">No results yet.</td></tr></tbody>
       </table>
     </div>
   </section>
 
-  <p class="note">Status key: <b>Found</b> = profile exists; <b>Not found</b> = handle unclaimed or does not resolve; <b>Invalid</b> = not a syntactically valid handle; <b>Error</b> = network or rate-limit failure (re-run). Results reflect the public AppView only; accounts that block logged-out viewing or are taken down may report as not found. Use only for lawful, authorized research.</p>
+  <p class="note">Status key: <b>Found</b> = profile exists; <b>Not found</b> = handle unclaimed or does not resolve; <b>Unavailable</b> = the account exists but is reported as suspended or deactivated; <b>Invalid</b> = not a syntactically valid handle; <b>Error</b> = network or rate-limit failure (use Re-check). Results reflect the public AppView only; accounts that block logged-out viewing or are taken down may report as not found. Use only for lawful, authorized research.</p>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -101,12 +106,12 @@
 <script>
 const API = 'https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=';
 const $ = id => document.getElementById(id);
-let rows = [], running = false, stopFlag = false, filter = 'all';
+let rows = [], running = false, stopFlag = false, filter = 'all', renderQueued = false;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Returns [{handle, source}] for one raw input token
 function candidates(raw, suffix) {
-  let t = raw.trim();
+  const t = raw.trim();
   if (!t) return [];
   const sfx = suffix.replace(/^\./, '').toLowerCase();
   if (EMAIL_RE.test(t)) {
@@ -119,125 +124,170 @@ function candidates(raw, suffix) {
   if (!h.includes('.') && sfx) h = h + '.' + sfx;
   return [{ handle: h, source: '' }];
 }
-// AT Protocol handle syntax
+// AT Protocol handle syntax, plus the 3-18 character rule for bsky.social names
 function validHandle(h) {
   if (h.length > 253) return false;
   const parts = h.split('.');
-  if (h.endsWith('.bsky.social') && parts.length === 3 && (parts[0].length < 3 || parts[0].length > 18)) return false;
   if (parts.length < 2) return false;
+  if (h.endsWith('.bsky.social') && parts.length === 3 && (parts[0].length < 3 || parts[0].length > 18)) return false;
   if (!/^[a-z]/.test(parts[parts.length - 1])) return false;
   return parts.every(p => p.length >= 1 && p.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(p));
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function check(row, delay) {
+async function check(row) {
+  row.note = '';
   if (!validHandle(row.handle)) { row.status = 'bad'; return; }
-  for (let attempt = 0; attempt < 4; attempt++) {
+  let lastErr = '';
+  for (let attempt = 0; attempt < 4 && !stopFlag; attempt++) {
     try {
       const r = await fetch(API + encodeURIComponent(row.handle));
-      if (r.status === 429) { await sleep(1500 * (attempt + 1)); continue; }
+      if (r.status === 429) { lastErr = 'rate limited'; await sleep(1500 * (attempt + 1)); continue; }
       if (r.ok) {
         const d = await r.json();
-        Object.assign(row, { status: 'found', did: d.did, name: d.displayName || '', followers: d.followersCount ?? '', posts: d.postsCount ?? '', created: (d.createdAt || '').slice(0, 10) });
+        Object.assign(row, { status: 'found', did: d.did, name: d.displayName || '', bio: (d.description || '').replace(/\s+/g, ' ').trim(), followers: d.followersCount ?? '', posts: d.postsCount ?? '', created: (d.createdAt || '').slice(0, 10) });
         if (d.handle && d.handle !== row.handle) row.handle = d.handle;
         return;
       }
-      if (r.status === 400) { row.status = 'free'; return; }
-      row.status = 'err'; row.error = 'HTTP ' + r.status; return;
-    } catch (e) { row.error = 'network'; await sleep(500); }
+      if (r.status === 400) {
+        let b = {};
+        try { b = await r.json(); } catch (e) {}
+        const msg = (b.error || '') + ' ' + (b.message || '');
+        if (/takedown|suspend/i.test(msg)) { row.status = 'gone'; row.note = 'suspended'; }
+        else if (/deactivat/i.test(msg)) { row.status = 'gone'; row.note = 'deactivated'; }
+        else row.status = 'free';
+        return;
+      }
+      if (r.status >= 500) { lastErr = 'HTTP ' + r.status; await sleep(800 * (attempt + 1)); continue; }
+      row.status = 'err'; row.note = 'HTTP ' + r.status; return;
+    } catch (e) { lastErr = 'network'; await sleep(500); }
   }
-  row.status = 'err'; row.error = row.error || 'rate limited';
+  if (stopFlag && !lastErr) return; // stopped before a result; leave as pending
+  row.status = 'err'; row.note = lastErr;
 }
 
-async function run() {
-  const suffix = $('suffix').value.trim();
-  const seen = new Set();
-  rows = [];
-  $('input').value.split(/[\s,;]+/).forEach(tok => candidates(tok, suffix).forEach(c => {
-    if (seen.has(c.handle)) { const ex = rows.find(r => r.handle === c.handle); if (ex && c.source && !ex.source.includes(c.source)) ex.source = ex.source ? ex.source + ', ' + c.source : c.source; return; }
-    seen.add(c.handle); rows.push({ handle: c.handle, source: c.source, status: 'pend' });
-  }));
-  if (!rows.length) return;
+function setButtons() {
+  $('run').disabled = $('clear').disabled = running;
+  $('stop').disabled = !running;
+  $('csv').disabled = $('pdf').disabled = running || !rows.length;
+  $('retry').disabled = running || !rows.some(r => r.status === 'err' || r.status === 'pend');
+}
+
+async function processRows(list) {
+  if (!list.length || running) return;
   running = true; stopFlag = false;
-  $('run').disabled = true; $('stop').disabled = false; $('csv').disabled = $('pdf').disabled = true;
+  setButtons(); render();
   const conc = +$('conc').value, delay = Math.max(0, +$('delay').value || 0);
   let i = 0;
-  render();
   const worker = async () => {
-    while (!stopFlag && i < rows.length) {
-      const row = rows[i++];
-      await check(row, delay);
-      render();
+    while (!stopFlag && i < list.length) {
+      await check(list[i++]);
+      queueRender();
       if (delay) await sleep(delay);
     }
   };
   await Promise.all(Array.from({ length: conc }, worker));
   running = false;
-  $('run').disabled = false; $('stop').disabled = true; $('csv').disabled = $('pdf').disabled = !rows.length;
-  render();
+  setButtons(); render();
 }
 
-const LABEL = { found: 'Found', free: 'Not found', err: 'Error', bad: 'Invalid', pend: 'Pending' };
-const CLS = { found: 'found', free: 'free', err: 'err', bad: 'bad', pend: 'pend' };
+function run() {
+  if (running) return;
+  const suffix = $('suffix').value.trim();
+  const byHandle = new Map();
+  $('input').value.split(/[\s,;]+/).forEach(tok => candidates(tok, suffix).forEach(c => {
+    let row = byHandle.get(c.handle);
+    if (!row) { row = { handle: c.handle, sources: [], status: 'pend', note: '' }; byHandle.set(c.handle, row); }
+    if (c.source && !row.sources.includes(c.source)) row.sources.push(c.source);
+  }));
+  rows = [...byHandle.values()];
+  filter = 'all';
+  processRows(rows);
+}
+
+function retry() {
+  const list = rows.filter(r => r.status === 'err' || r.status === 'pend');
+  list.forEach(r => { r.status = 'pend'; r.note = ''; });
+  processRows(list);
+}
+
+const LABEL = { found: 'Found', gone: 'Unavailable', free: 'Not found', err: 'Error', bad: 'Invalid', pend: 'Pending' };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const profileUrl = r => 'https://bsky.app/profile/' + r.handle;
+const count = k => rows.filter(r => r.status === k).length;
+const visible = () => rows.filter(r => filter === 'all' || r.status === filter);
+
+// Coalesce per-result updates into one paint so large lists stay responsive
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  setTimeout(() => { renderQueued = false; render(); }, 60);
+}
 
 function render() {
-  const c = k => rows.filter(r => r.status === k).length;
-  const done = rows.filter(r => r.status !== 'pend').length;
+  const done = rows.length - count('pend');
   $('prog').style.width = rows.length ? (done / rows.length * 100) + '%' : '0';
-  $('stats').innerHTML = rows.length ? `<span>Checked <b>${done}/${rows.length}</b></span><span>Found <b>${c('found')}</b></span><span>Not found <b>${c('free')}</b></span><span>Invalid <b>${c('bad')}</b></span><span>Errors <b>${c('err')}</b></span>` : '';
-  $('filters').innerHTML = ['all', 'found', 'free', 'err', 'bad'].map(k => `<span class="chip ${filter === k ? 'on' : ''}" data-f="${k}">${k === 'all' ? 'All' : LABEL[k]}</span>`).join('');
-  const vis = rows.filter(r => filter === 'all' || r.status === filter);
+  $('stats').innerHTML = rows.length ? `<span>Checked <b>${done}/${rows.length}</b></span><span>Found <b>${count('found')}</b></span><span>Unavailable <b>${count('gone')}</b></span><span>Not found <b>${count('free')}</b></span><span>Invalid <b>${count('bad')}</b></span><span>Errors <b>${count('err')}</b></span>` : '';
+  $('filters').innerHTML = ['all', 'found', 'gone', 'free', 'err', 'bad'].map(k => `<button type="button" class="chip ${filter === k ? 'on' : ''}" data-f="${k}" aria-pressed="${filter === k}">${k === 'all' ? 'All' : LABEL[k]} (${k === 'all' ? rows.length : count(k)})</button>`).join('');
+  const vis = visible();
   $('out').innerHTML = vis.length ? vis.map(r => `<tr>
     <td class="mono">${esc(r.handle)}</td>
-    <td class="mono">${esc(r.source)}</td>
-    <td><span class="s ${CLS[r.status]}">${LABEL[r.status]}</span>${r.error ? ' <span class="hint">' + esc(r.error) + '</span>' : ''}</td>
-    <td>${esc(r.name)}</td><td class="mono">${esc(r.did)}</td><td>${esc(r.followers)}</td><td>${esc(r.posts)}</td><td>${esc(r.created)}</td>
-    <td>${r.status === 'found' ? `<a href="https://bsky.app/profile/${encodeURIComponent(r.handle)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</td></tr>`).join('')
-    : '<tr><td colspan="9" class="empty">No results yet.</td></tr>';
+    <td class="mono">${esc(r.sources.join(', '))}</td>
+    <td><span class="s ${r.status}">${LABEL[r.status]}</span>${r.note ? ' <span class="hint">' + esc(r.note) + '</span>' : ''}</td>
+    <td>${esc(r.name)}${r.bio ? `<div class="hint" title="${esc(r.bio)}">${esc(r.bio.length > 90 ? r.bio.slice(0, 90) + '…' : r.bio)}</div>` : ''}</td>
+    <td class="mono">${esc(r.did)}</td><td>${esc(r.followers)}</td><td>${esc(r.posts)}</td><td>${esc(r.created)}</td>
+    <td>${r.status === 'found' ? `<a href="${esc(profileUrl(r))}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</td></tr>`).join('')
+    : `<tr><td colspan="9" class="empty">${rows.length ? 'No rows match this filter.' : 'No results yet.'}</td></tr>`;
 }
 
+const stamp = () => new Date().toISOString().slice(0, 10);
+
 function exportCsv() {
-  const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-  const lines = [['handle', 'source_email', 'status', 'display_name', 'did', 'followers', 'posts', 'created', 'url'].join(',')]
-    .concat(rows.map(r => [r.handle, r.source, LABEL[r.status], r.name, r.did, r.followers, r.posts, r.created, r.status === 'found' ? 'https://bsky.app/profile/' + r.handle : ''].map(q).join(',')));
+  // Quote every field, and neutralise leading = + - @ so profile text cannot run as a spreadsheet formula
+  const q = v => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = "'" + t; return '"' + t.replace(/"/g, '""') + '"'; };
+  const lines = [['handle', 'source_email', 'status', 'note', 'display_name', 'bio', 'did', 'followers', 'posts', 'created', 'url'].join(',')]
+    .concat(rows.map(r => [r.handle, r.sources.join('; '), LABEL[r.status], r.note, r.name, r.bio, r.did, r.followers, r.posts, r.created, r.status === 'found' ? profileUrl(r) : ''].map(q).join(',')));
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
-  a.download = 'bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.csv';
-  a.click(); URL.revokeObjectURL(a.href);
+  a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'bluesky-enum-' + stamp() + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 function exportPdf() {
   if (!window.jspdf) { alert('PDF library failed to load. Check your connection and reload.'); return; }
-  const vis = rows.filter(r => filter === 'all' || r.status === filter);
-  const c = k => rows.filter(r => r.status === k).length;
+  // The built-in PDF fonts only cover Latin-1; replace anything else rather than print garbage
+  const safe = v => String(v ?? '').replace(/[^\x00-\xFF]/g, '?');
+  const vis = visible();
   const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
   doc.setFontSize(16); doc.text('Bluesky Username Enumeration Report', 40, 42);
   doc.setFontSize(9); doc.setTextColor(90);
   doc.text('Generated ' + new Date().toLocaleString() + '  |  Source: public.api.bsky.app (app.bsky.actor.getProfile)', 40, 58);
-  doc.text(`Checked ${rows.length}  |  Found ${c('found')}  |  Not found ${c('free')}  |  Invalid ${c('bad')}  |  Errors ${c('err')}  |  Showing: ${filter === 'all' ? 'all results' : LABEL[filter]}`, 40, 72);
-  const colors = { found: [22, 130, 70], free: [20, 90, 140], err: [180, 110, 0], bad: [190, 40, 40], pend: [120, 120, 120] };
+  doc.text(`Checked ${rows.length - count('pend')} of ${rows.length}  |  Found ${count('found')}  |  Unavailable ${count('gone')}  |  Not found ${count('free')}  |  Invalid ${count('bad')}  |  Errors ${count('err')}  |  Showing: ${filter === 'all' ? 'all results' : LABEL[filter]}`, 40, 72);
+  const colors = { found: [22, 130, 70], gone: [120, 60, 170], free: [20, 90, 140], err: [180, 110, 0], bad: [190, 40, 40], pend: [120, 120, 120] };
   doc.autoTable({
     startY: 86,
     head: [['Handle', 'Source email', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
-    body: vis.map(r => [r.handle, r.source || '', LABEL[r.status], r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : '']),
+    body: vis.map(r => [r.handle, r.sources.join(', '), LABEL[r.status] + (r.note ? ' (' + r.note + ')' : ''), r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : ''].map(safe)),
     styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
     headStyles: { fillColor: [0, 119, 182] },
     columnStyles: { 4: { font: 'courier', fontSize: 7 } },
-    didParseCell: d => { if (d.section === 'body' && d.column.index === 2) { const r = vis[d.row.index]; d.cell.styles.textColor = colors[r.status]; d.cell.styles.fontStyle = 'bold'; } },
-    didDrawCell: d => { if (d.section === 'body' && d.column.index === 8) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: 'https://bsky.app/profile/' + r.handle }); } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index === 2) { d.cell.styles.textColor = colors[vis[d.row.index].status]; d.cell.styles.fontStyle = 'bold'; } },
+    didDrawCell: d => { if (d.section === 'body' && d.column.index === 8) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: profileUrl(r) }); } },
     didDrawPage: () => { doc.setFontSize(8); doc.setTextColor(120); doc.text('Page ' + doc.internal.getNumberOfPages(), doc.internal.pageSize.getWidth() - 70, doc.internal.pageSize.getHeight() - 20); }
   });
-  doc.save('bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.pdf');
+  doc.save('bluesky-enum-' + stamp() + '.pdf');
 }
 
 $('run').onclick = run;
-$('pdf').onclick = exportPdf;
+$('retry').onclick = retry;
 $('stop').onclick = () => { stopFlag = true; };
 $('csv').onclick = exportCsv;
-$('clear').onclick = () => { if (running) return; rows = []; $('input').value = ''; $('csv').disabled = $('pdf').disabled = true; render(); };
+$('pdf').onclick = exportPdf;
+$('clear').onclick = () => { if (running) return; rows = []; filter = 'all'; $('input').value = ''; setButtons(); render(); };
 $('filters').onclick = e => { const f = e.target.dataset.f; if (f) { filter = f; render(); } };
-render();
+$('input').onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } };
+setButtons(); render();
 </script>
 </body>
 </html>

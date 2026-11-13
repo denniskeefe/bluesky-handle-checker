@@ -76,6 +76,7 @@
       <button id="run">Run enumeration</button>
       <button id="stop" class="ghost" disabled>Stop</button>
       <button id="csv" class="ghost" disabled>Export CSV</button>
+      <button id="pdf" class="ghost" disabled>Export PDF</button>
       <button id="clear" class="ghost">Clear</button>
     </div>
     <div class="bar"><div id="prog"></div></div>
@@ -95,6 +96,8 @@
   <p class="note">Status key: <b>Found</b> = profile exists; <b>Not found</b> = handle unclaimed or does not resolve; <b>Invalid</b> = not a syntactically valid handle; <b>Error</b> = network or rate-limit failure (re-run). Results reflect the public AppView only; accounts that block logged-out viewing or are taken down may report as not found. Use only for lawful, authorized research.</p>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script>
 const API = 'https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=';
 const $ = id => document.getElementById(id);
@@ -141,7 +144,7 @@ async function run() {
   rows = $('input').value.split(/[\s,;]+/).map(x => normalize(x, suffix)).filter(h => h && !seen.has(h) && seen.add(h)).map(h => ({ handle: h, status: 'pend' }));
   if (!rows.length) return;
   running = true; stopFlag = false;
-  $('run').disabled = true; $('stop').disabled = false; $('csv').disabled = true;
+  $('run').disabled = true; $('stop').disabled = false; $('csv').disabled = $('pdf').disabled = true;
   const conc = +$('conc').value, delay = Math.max(0, +$('delay').value || 0);
   let i = 0;
   render();
@@ -155,7 +158,7 @@ async function run() {
   };
   await Promise.all(Array.from({ length: conc }, worker));
   running = false;
-  $('run').disabled = false; $('stop').disabled = true; $('csv').disabled = !rows.length;
+  $('run').disabled = false; $('stop').disabled = true; $('csv').disabled = $('pdf').disabled = !rows.length;
   render();
 }
 
@@ -188,10 +191,35 @@ function exportCsv() {
   a.click(); URL.revokeObjectURL(a.href);
 }
 
+function exportPdf() {
+  if (!window.jspdf) { alert('PDF library failed to load. Check your connection and reload.'); return; }
+  const vis = rows.filter(r => filter === 'all' || r.status === filter);
+  const c = k => rows.filter(r => r.status === k).length;
+  const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  doc.setFontSize(16); doc.text('Bluesky Username Enumeration Report', 40, 42);
+  doc.setFontSize(9); doc.setTextColor(90);
+  doc.text('Generated ' + new Date().toLocaleString() + '  |  Source: public.api.bsky.app (app.bsky.actor.getProfile)', 40, 58);
+  doc.text(`Checked ${rows.length}  |  Found ${c('found')}  |  Not found ${c('free')}  |  Invalid ${c('bad')}  |  Errors ${c('err')}  |  Showing: ${filter === 'all' ? 'all results' : LABEL[filter]}`, 40, 72);
+  const colors = { found: [22, 130, 70], free: [20, 90, 140], err: [180, 110, 0], bad: [190, 40, 40], pend: [120, 120, 120] };
+  doc.autoTable({
+    startY: 86,
+    head: [['Handle', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
+    body: vis.map(r => [r.handle, LABEL[r.status], r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : '']),
+    styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
+    headStyles: { fillColor: [0, 119, 182] },
+    columnStyles: { 3: { font: 'courier', fontSize: 7 } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index === 1) { const r = vis[d.row.index]; d.cell.styles.textColor = colors[r.status]; d.cell.styles.fontStyle = 'bold'; } },
+    didDrawCell: d => { if (d.section === 'body' && d.column.index === 7) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: 'https://bsky.app/profile/' + r.handle }); } },
+    didDrawPage: () => { doc.setFontSize(8); doc.setTextColor(120); doc.text('Page ' + doc.internal.getNumberOfPages(), doc.internal.pageSize.getWidth() - 70, doc.internal.pageSize.getHeight() - 20); }
+  });
+  doc.save('bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.pdf');
+}
+
 $('run').onclick = run;
+$('pdf').onclick = exportPdf;
 $('stop').onclick = () => { stopFlag = true; };
 $('csv').onclick = exportCsv;
-$('clear').onclick = () => { if (running) return; rows = []; $('input').value = ''; $('csv').disabled = true; render(); };
+$('clear').onclick = () => { if (running) return; rows = []; $('input').value = ''; $('csv').disabled = $('pdf').disabled = true; render(); };
 $('filters').onclick = e => { const f = e.target.dataset.f; if (f) { filter = f; render(); } };
 render();
 </script>

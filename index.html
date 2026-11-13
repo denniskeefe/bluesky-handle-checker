@@ -55,9 +55,9 @@
   <p class="sub">Check a list of handles against Bluesky and see which exist. Runs entirely in your browser against the public Bluesky AppView API; nothing is sent to Analyst Recon.</p>
 
   <section class="panel">
-    <label for="input">Usernames (one per line, or comma / space separated)</label>
-    <textarea id="input" placeholder="jay&#10;alice&#10;bob.example.com&#10;@carol.bsky.social" spellcheck="false"></textarea>
-    <div class="hint">Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped.</div>
+    <label for="input">Usernames or email addresses (one per line, or comma / space separated)</label>
+    <textarea id="input" placeholder="jay&#10;alice@example.com&#10;john.doe+news@gmail.com&#10;bob.example.com&#10;@carol.bsky.social" spellcheck="false"></textarea>
+    <div class="hint">Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped. <b>Email addresses</b> are reduced to the part before the <code>@</code>; any <code>+tag</code> is dropped, and since <code>bsky.social</code> names cannot contain dots or underscores, both a joined (<code>johndoe</code>) and hyphenated (<code>john-doe</code>) variant are checked.</div>
     <div class="row">
       <div>
         <label for="suffix">Default suffix</label>
@@ -87,8 +87,8 @@
     <div class="filters" id="filters"></div>
     <div class="tw">
       <table>
-        <thead><tr><th>Handle</th><th>Status</th><th>Display name</th><th>DID</th><th>Followers</th><th>Posts</th><th>Created</th><th>Profile</th></tr></thead>
-        <tbody id="out"><tr><td colspan="8" class="empty">No results yet.</td></tr></tbody>
+        <thead><tr><th>Handle</th><th>Source email</th><th>Status</th><th>Display name</th><th>DID</th><th>Followers</th><th>Posts</th><th>Created</th><th>Profile</th></tr></thead>
+        <tbody id="out"><tr><td colspan="9" class="empty">No results yet.</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -103,16 +103,27 @@ const API = 'https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=';
 const $ = id => document.getElementById(id);
 let rows = [], running = false, stopFlag = false, filter = 'all';
 
-function normalize(raw, suffix) {
-  let h = raw.trim().replace(/^https?:\/\/(www\.)?bsky\.app\/profile\//i, '').replace(/[\/?#].*$/, '').replace(/^@/, '').toLowerCase();
-  if (!h) return null;
-  if (!h.includes('.') && suffix) h = h + '.' + suffix.replace(/^\./, '').toLowerCase();
-  return h;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Returns [{handle, source}] for one raw input token
+function candidates(raw, suffix) {
+  let t = raw.trim();
+  if (!t) return [];
+  const sfx = suffix.replace(/^\./, '').toLowerCase();
+  if (EMAIL_RE.test(t)) {
+    const local = t.slice(0, t.lastIndexOf('@')).split('+')[0].toLowerCase();
+    const set = new Set([local.replace(/[._]+/g, ''), local.replace(/[._]+/g, '-').replace(/^-+|-+$/g, '')]);
+    return [...set].filter(Boolean).map(n => ({ handle: sfx ? n + '.' + sfx : n, source: t }));
+  }
+  let h = t.replace(/^https?:\/\/(www\.)?bsky\.app\/profile\//i, '').replace(/[\/?#].*$/, '').replace(/^@/, '').toLowerCase();
+  if (!h) return [];
+  if (!h.includes('.') && sfx) h = h + '.' + sfx;
+  return [{ handle: h, source: '' }];
 }
 // AT Protocol handle syntax
 function validHandle(h) {
   if (h.length > 253) return false;
   const parts = h.split('.');
+  if (h.endsWith('.bsky.social') && parts.length === 3 && (parts[0].length < 3 || parts[0].length > 18)) return false;
   if (parts.length < 2) return false;
   if (!/^[a-z]/.test(parts[parts.length - 1])) return false;
   return parts.every(p => p.length >= 1 && p.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(p));
@@ -141,7 +152,11 @@ async function check(row, delay) {
 async function run() {
   const suffix = $('suffix').value.trim();
   const seen = new Set();
-  rows = $('input').value.split(/[\s,;]+/).map(x => normalize(x, suffix)).filter(h => h && !seen.has(h) && seen.add(h)).map(h => ({ handle: h, status: 'pend' }));
+  rows = [];
+  $('input').value.split(/[\s,;]+/).forEach(tok => candidates(tok, suffix).forEach(c => {
+    if (seen.has(c.handle)) { const ex = rows.find(r => r.handle === c.handle); if (ex && c.source && !ex.source.includes(c.source)) ex.source = ex.source ? ex.source + ', ' + c.source : c.source; return; }
+    seen.add(c.handle); rows.push({ handle: c.handle, source: c.source, status: 'pend' });
+  }));
   if (!rows.length) return;
   running = true; stopFlag = false;
   $('run').disabled = true; $('stop').disabled = false; $('csv').disabled = $('pdf').disabled = true;
@@ -175,16 +190,17 @@ function render() {
   const vis = rows.filter(r => filter === 'all' || r.status === filter);
   $('out').innerHTML = vis.length ? vis.map(r => `<tr>
     <td class="mono">${esc(r.handle)}</td>
+    <td class="mono">${esc(r.source)}</td>
     <td><span class="s ${CLS[r.status]}">${LABEL[r.status]}</span>${r.error ? ' <span class="hint">' + esc(r.error) + '</span>' : ''}</td>
     <td>${esc(r.name)}</td><td class="mono">${esc(r.did)}</td><td>${esc(r.followers)}</td><td>${esc(r.posts)}</td><td>${esc(r.created)}</td>
     <td>${r.status === 'found' ? `<a href="https://bsky.app/profile/${encodeURIComponent(r.handle)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</td></tr>`).join('')
-    : '<tr><td colspan="8" class="empty">No results yet.</td></tr>';
+    : '<tr><td colspan="9" class="empty">No results yet.</td></tr>';
 }
 
 function exportCsv() {
   const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-  const lines = [['handle', 'status', 'display_name', 'did', 'followers', 'posts', 'created', 'url'].join(',')]
-    .concat(rows.map(r => [r.handle, LABEL[r.status], r.name, r.did, r.followers, r.posts, r.created, r.status === 'found' ? 'https://bsky.app/profile/' + r.handle : ''].map(q).join(',')));
+  const lines = [['handle', 'source_email', 'status', 'display_name', 'did', 'followers', 'posts', 'created', 'url'].join(',')]
+    .concat(rows.map(r => [r.handle, r.source, LABEL[r.status], r.name, r.did, r.followers, r.posts, r.created, r.status === 'found' ? 'https://bsky.app/profile/' + r.handle : ''].map(q).join(',')));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
   a.download = 'bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.csv';
@@ -203,13 +219,13 @@ function exportPdf() {
   const colors = { found: [22, 130, 70], free: [20, 90, 140], err: [180, 110, 0], bad: [190, 40, 40], pend: [120, 120, 120] };
   doc.autoTable({
     startY: 86,
-    head: [['Handle', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
-    body: vis.map(r => [r.handle, LABEL[r.status], r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : '']),
+    head: [['Handle', 'Source email', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
+    body: vis.map(r => [r.handle, r.source || '', LABEL[r.status], r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : '']),
     styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
     headStyles: { fillColor: [0, 119, 182] },
-    columnStyles: { 3: { font: 'courier', fontSize: 7 } },
-    didParseCell: d => { if (d.section === 'body' && d.column.index === 1) { const r = vis[d.row.index]; d.cell.styles.textColor = colors[r.status]; d.cell.styles.fontStyle = 'bold'; } },
-    didDrawCell: d => { if (d.section === 'body' && d.column.index === 7) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: 'https://bsky.app/profile/' + r.handle }); } },
+    columnStyles: { 4: { font: 'courier', fontSize: 7 } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index === 2) { const r = vis[d.row.index]; d.cell.styles.textColor = colors[r.status]; d.cell.styles.fontStyle = 'bold'; } },
+    didDrawCell: d => { if (d.section === 'body' && d.column.index === 8) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: 'https://bsky.app/profile/' + r.handle }); } },
     didDrawPage: () => { doc.setFontSize(8); doc.setTextColor(120); doc.text('Page ' + doc.internal.getNumberOfPages(), doc.internal.pageSize.getWidth() - 70, doc.internal.pageSize.getHeight() - 20); }
   });
   doc.save('bluesky-enum-' + new Date().toISOString().slice(0, 10) + '.pdf');

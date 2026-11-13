@@ -9,7 +9,7 @@ A single-file, client-side tool that checks a list of usernames against Bluesky 
 - Adjustable concurrency and delay, automatic backoff on rate limits and server errors, and a re-check button for errors or a stopped run.
 - Flags accounts the API reports as suspended or deactivated separately from handles that do not exist.
 - Results table with display name, bio, DID, follower/post counts and creation date; filter by status.
-- Export to CSV (formula-injection safe, Excel-friendly UTF-8) or a PDF report of the current filter.
+- Export to CSV (formula-injection safe, Excel-friendly UTF-8) or a PDF report of the current filter, including each found profile's avatar.
 
 ## Use
 

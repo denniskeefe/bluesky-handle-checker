@@ -145,7 +145,7 @@ async function check(row) {
       if (r.status === 429) { lastErr = 'rate limited'; await sleep(1500 * (attempt + 1)); continue; }
       if (r.ok) {
         const d = await r.json();
-        Object.assign(row, { status: 'found', did: d.did, name: d.displayName || '', bio: (d.description || '').replace(/\s+/g, ' ').trim(), followers: d.followersCount ?? '', posts: d.postsCount ?? '', created: (d.createdAt || '').slice(0, 10) });
+        Object.assign(row, { status: 'found', avatar: d.avatar || '', did: d.did, name: d.displayName || '', bio: (d.description || '').replace(/\s+/g, ' ').trim(), followers: d.followersCount ?? '', posts: d.postsCount ?? '', created: (d.createdAt || '').slice(0, 10) });
         if (d.handle && d.handle !== row.handle) row.handle = d.handle;
         return;
       }
@@ -254,8 +254,46 @@ function exportCsv() {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function exportPdf() {
+// The Bluesky image CDN sends no CORS headers, so avatars are fetched as blobs from the account's PDS
+// (resolved via plc.directory), then downscaled to a small JPEG for embedding in the PDF.
+const pdsCache = new Map();
+async function pdsFor(did) {
+  if (!pdsCache.has(did)) {
+    pdsCache.set(did, (async () => {
+      try {
+        if (!did.startsWith('did:plc:')) return 'https://bsky.social';
+        const d = await (await fetch('https://plc.directory/' + did)).json();
+        return d.service.find(x => x.id === '#atproto_pds').serviceEndpoint;
+      } catch (e) { return 'https://bsky.social'; }
+    })());
+  }
+  return pdsCache.get(did);
+}
+async function loadAvatar(url) {
+  try {
+    const m = url.match(/\/avatar\/plain\/([^/]+)\/([^@/]+)/);
+    if (!m) return null;
+    const [, did, cid] = m;
+    const pds = await pdsFor(did);
+    const r = await fetch(`${pds}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(cid)}`);
+    if (!r.ok) return null;
+    const src = URL.createObjectURL(await r.blob());
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+      const N = 96, side = Math.min(img.width, img.height), c = document.createElement('canvas');
+      c.width = c.height = N;
+      c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, N, N);
+      return { data: c.toDataURL('image/jpeg', 0.85), fmt: 'JPEG' };
+    } finally { URL.revokeObjectURL(src); }
+  } catch (e) { return null; }
+}
+
+async function exportPdf() {
   if (!window.jspdf) { alert('PDF library failed to load. Check your connection and reload.'); return; }
+  const btn = $('pdf'); btn.disabled = true; btn.textContent = 'Building PDF…';
+  try {
+  const avatars = new Map();
+  await Promise.all(visible().filter(r => r.status === 'found' && r.avatar).map(async r => { const a = await loadAvatar(r.avatar); if (a) avatars.set(r.handle, a); }));
   // The built-in PDF fonts only cover Latin-1; replace anything else rather than print garbage
   const safe = v => String(v ?? '').replace(/[^\x00-\xFF]/g, '?');
   const vis = visible();
@@ -267,16 +305,21 @@ function exportPdf() {
   const colors = { found: [22, 130, 70], gone: [120, 60, 170], free: [20, 90, 140], err: [180, 110, 0], bad: [190, 40, 40], pend: [120, 120, 120] };
   doc.autoTable({
     startY: 86,
-    head: [['Handle', 'Source email', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
-    body: vis.map(r => [r.handle, r.sources.join(', '), LABEL[r.status] + (r.note ? ' (' + r.note + ')' : ''), r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : ''].map(safe)),
-    styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
+    head: [['Avatar', 'Handle', 'Source email', 'Status', 'Display name', 'DID', 'Followers', 'Posts', 'Created', 'Profile']],
+    body: vis.map(r => ['', r.handle, r.sources.join(', '), LABEL[r.status] + (r.note ? ' (' + r.note + ')' : ''), r.name || '', r.did || '', r.followers ?? '', r.posts ?? '', r.created || '', r.status === 'found' ? 'bsky.app/profile/' + r.handle : ''].map(safe)),
+    styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak', },
+    bodyStyles: { minCellHeight: 32, valign: 'middle' },
     headStyles: { fillColor: [0, 119, 182] },
-    columnStyles: { 4: { font: 'courier', fontSize: 7 } },
-    didParseCell: d => { if (d.section === 'body' && d.column.index === 2) { d.cell.styles.textColor = colors[vis[d.row.index].status]; d.cell.styles.fontStyle = 'bold'; } },
-    didDrawCell: d => { if (d.section === 'body' && d.column.index === 8) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: profileUrl(r) }); } },
+    columnStyles: { 0: { cellWidth: 36 }, 5: { font: 'courier', fontSize: 7 } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index === 3) { d.cell.styles.textColor = colors[vis[d.row.index].status]; d.cell.styles.fontStyle = 'bold'; } },
+    didDrawCell: d => {
+      if (d.section !== 'body') return;
+      if (d.column.index === 0) { const a = avatars.get(vis[d.row.index].handle); if (a) { try { doc.addImage(a.data, a.fmt, d.cell.x + 3, d.cell.y + 3, 26, 26); } catch (e) {} } }
+      if (d.column.index === 9) { const r = vis[d.row.index]; if (r.status === 'found') doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: profileUrl(r) }); } },
     didDrawPage: () => { doc.setFontSize(8); doc.setTextColor(120); doc.text('Page ' + doc.internal.getNumberOfPages(), doc.internal.pageSize.getWidth() - 70, doc.internal.pageSize.getHeight() - 20); }
   });
-  doc.save('bluesky-enum-' + stamp() + '.pdf');
+  doc.save('bluesky-handle-check-' + stamp() + '.pdf');
+  } finally { btn.textContent = 'Export PDF'; setButtons(); }
 }
 
 $('run').onclick = run;

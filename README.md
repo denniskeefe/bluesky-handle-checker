@@ -4,6 +4,7 @@ A single-file, client-side tool that checks a list of usernames against Bluesky 
 
 - Queries the public Bluesky AppView API (`app.bsky.actor.getProfile`) directly from the browser; no backend, no data leaves your machine except the lookups.
 - Accepts bare names (default suffix `bsky.social`), full handles and custom domains, `@handles`, and `bsky.app/profile/` URLs.
+- Bulk input: paste a list or import a `.txt` / `.csv` file. Choose **Auto-detect** for a mixed list, or **Usernames only** / **Email addresses only** to enforce one type (entries of the other type are skipped and listed). A live count shows how many usernames and emails were detected.
 - Accepts email addresses: the part before the `@` is searched, `+tags` are dropped, and dotted names are tried both joined (`johndoe`) and hyphenated (`john-doe`).
 - Validates handle syntax per the AT Protocol before sending requests.
 - Adjustable concurrency and delay, automatic backoff on rate limits and server errors, and a re-check button for errors or a stopped run.

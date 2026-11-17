@@ -22,8 +22,11 @@
   textarea,input,select{width:100%;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:.55rem .7rem;font:inherit;font-size:.9rem}
   textarea{min-height:170px;font-family:ui-monospace,Menlo,Consolas,monospace;resize:vertical}
   textarea:focus,input:focus,select:focus{outline:1px solid var(--accent)}
-  .row{display:grid;grid-template-columns:2fr 1fr 1fr;gap:1rem;margin-top:1rem}
-  @media(max-width:640px){.row{grid-template-columns:1fr}}
+  .row{display:grid;grid-template-columns:1.3fr 1.6fr 1fr 1fr;gap:1rem;margin-top:1rem}
+  .detect{font-size:.8rem;color:var(--accent);margin-top:.5rem;min-height:1.2em}
+  .skip{font-size:.8rem;color:var(--yellow);margin-top:.4rem;word-break:break-word}
+  @media(max-width:760px){.row{grid-template-columns:1fr 1fr}}
+  @media(max-width:480px){.row{grid-template-columns:1fr}}
   .actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1rem;align-items:center}
   button{background:var(--accent2);color:#fff;border:0;border-radius:6px;padding:.55rem 1.1rem;font:inherit;font-size:.9rem;cursor:pointer}
   button:hover:not(:disabled){background:var(--accent);color:#04121c}
@@ -59,10 +62,20 @@
   <p class="sub">Check a list of handles against Bluesky and see which exist. Runs entirely in your browser against the public Bluesky AppView API; there is no backend, and the only requests made are the lookups themselves.</p>
 
   <section class="panel">
-    <label for="input">Usernames or email addresses (one per line, or comma / space separated)</label>
+    <label for="input">Bulk usernames and/or email addresses (one per line, or comma / space separated)</label>
     <textarea id="input" placeholder="jay&#10;alice@example.com&#10;john.doe+news@gmail.com&#10;bob.example.com&#10;@carol.bsky.social" spellcheck="false"></textarea>
-    <div class="hint">Press Ctrl/Cmd + Enter to run. Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped. <b>Email addresses</b> are reduced to the part before the <code>@</code>; any <code>+tag</code> is dropped, and since <code>bsky.social</code> names cannot contain dots or underscores, both a joined (<code>johndoe</code>) and hyphenated (<code>john-doe</code>) variant are checked.</div>
+    <div class="detect" id="detect" aria-live="polite"></div>
+    <div class="skip" id="skip" role="status"></div>
+    <div class="hint">Paste a list or use <b>Import file</b> (.txt / .csv). Press Ctrl/Cmd + Enter to run. Bare names get the default suffix appended. Entries containing a dot are treated as full handles (custom domains). Leading <code>@</code> and <code>bsky.app/profile/</code> URLs are stripped. <b>Email addresses</b> are reduced to the part before the <code>@</code>; any <code>+tag</code> is dropped, and since <code>bsky.social</code> names cannot contain dots or underscores, both a joined (<code>johndoe</code>) and hyphenated (<code>john-doe</code>) variant are checked.</div>
     <div class="row">
+      <div>
+        <label for="mode">Input type</label>
+        <select id="mode">
+          <option value="auto" selected>Auto-detect (mixed list)</option>
+          <option value="user">Usernames only</option>
+          <option value="email">Email addresses only</option>
+        </select>
+      </div>
       <div>
         <label for="suffix">Default suffix</label>
         <input id="suffix" value="bsky.social" spellcheck="false" />
@@ -78,6 +91,8 @@
     </div>
     <div class="actions">
       <button id="run">Run check</button>
+      <button id="import" class="ghost" type="button">Import file</button>
+      <input id="file" type="file" accept=".txt,.csv,.tsv,text/plain,text/csv" hidden />
       <button id="stop" class="ghost" disabled>Stop</button>
       <button id="retry" class="ghost" disabled>Re-check errors / pending</button>
       <button id="csv" class="ghost" disabled>Export CSV</button>
@@ -109,6 +124,14 @@ const $ = id => document.getElementById(id);
 let rows = [], running = false, stopFlag = false, filter = 'all', renderQueued = false;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Split bulk text into tokens (newline / comma / semicolon / space separated), stripping CSV quotes
+const tokenize = text => text.split(/[\s,;]+/).map(t => t.replace(/^["'<(]+|["'>)]+$/g, '')).filter(Boolean);
+const kindOf = t => EMAIL_RE.test(t) ? 'email' : 'user';
+function updateDetect() {
+  const toks = tokenize($('input').value);
+  const e = toks.filter(t => kindOf(t) === 'email').length, u = toks.length - e;
+  $('detect').textContent = toks.length ? `Detected ${u} username${u === 1 ? '' : 's'} and ${e} email${e === 1 ? '' : 's'}.` : '';
+}
 // Returns [{handle, source}] for one raw input token
 function candidates(raw, suffix) {
   const t = raw.trim();
@@ -167,7 +190,7 @@ async function check(row) {
 }
 
 function setButtons() {
-  $('run').disabled = $('clear').disabled = running;
+  $('run').disabled = $('clear').disabled = $('import').disabled = running;
   $('stop').disabled = !running;
   $('csv').disabled = $('pdf').disabled = running || !rows.length;
   $('retry').disabled = running || !rows.some(r => r.status === 'err' || r.status === 'pend');
@@ -195,11 +218,18 @@ function run() {
   if (running) return;
   const suffix = $('suffix').value.trim();
   const byHandle = new Map();
-  $('input').value.split(/[\s,;]+/).forEach(tok => candidates(tok, suffix).forEach(c => {
+  const mode = $('mode').value, skipped = [];
+  tokenize($('input').value).forEach(tok => {
+    const kind = kindOf(tok);
+    if ((mode === 'user' && kind === 'email') || (mode === 'email' && kind === 'user')) { skipped.push(tok); return; }
+    candidates(tok, suffix).forEach(c => {
     let row = byHandle.get(c.handle);
     if (!row) { row = { handle: c.handle, sources: [], status: 'pend', note: '' }; byHandle.set(c.handle, row); }
     if (c.source && !row.sources.includes(c.source)) row.sources.push(c.source);
-  }));
+    });
+  });
+  const shown = skipped.slice(0, 8).join(', ') + (skipped.length > 8 ? ` … (+${skipped.length - 8} more)` : '');
+  $('skip').textContent = skipped.length ? `Skipped ${skipped.length} ${skipped.length === 1 ? 'entry' : 'entries'} (${mode === 'user' ? 'email addresses, but the input type is set to usernames only' : 'not email addresses, but the input type is set to email addresses only'}): ${shown}` : '';
   rows = [...byHandle.values()];
   filter = 'all';
   processRows(rows);
@@ -327,8 +357,22 @@ $('retry').onclick = retry;
 $('stop').onclick = () => { stopFlag = true; };
 $('csv').onclick = exportCsv;
 $('pdf').onclick = exportPdf;
-$('clear').onclick = () => { if (running) return; rows = []; filter = 'all'; $('input').value = ''; setButtons(); render(); };
+$('clear').onclick = () => { if (running) return; rows = []; filter = 'all'; $('input').value = ''; $('skip').textContent = ''; updateDetect(); setButtons(); render(); };
 $('filters').onclick = e => { const f = e.target.dataset.f; if (f) { filter = f; render(); } };
+$('import').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  if (f.size > 5 * 1024 * 1024) { alert('File is too large (5 MB max).'); return; }
+  let text = await f.text();
+  // Drop a leading header row such as "email" / "username" / "handle"
+  text = text.replace(/^\ufeff/, '').replace(/^\s*(e-?mails?|e-?mail addresses?|user ?names?|handles?)\s*(?=\r?\n)/i, '');
+  const cur = $('input').value.trim();
+  $('input').value = (cur ? cur + '\n' : '') + text.trim();
+  updateDetect();
+};
+$('input').oninput = updateDetect;
 $('input').onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); } };
 setButtons(); render();
 </script>
